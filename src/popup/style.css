@@ -1,0 +1,11 @@
+body {
+  width: 280px;
+  margin: 0;
+  padding: 16px;
+  font-family: system-ui, sans-serif;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}

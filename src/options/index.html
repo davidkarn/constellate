@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Constellate Options</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <h1>Constellate</h1>
+    <form id="options">
+      <label for="api-key">OpenRouter API key</label>
+      <input
+        id="api-key"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="sk-or-..."
+      />
+      <button type="submit">Save</button>
+      <p id="status" role="status"></p>
+    </form>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
