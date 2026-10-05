@@ -1,12 +1,14 @@
 import {
   isChatReplyResult,
   type ChatMessage,
+  type ChatReplyResult,
   type ChatMessagesUpdate,
 } from '../shared/chat'
+import { mountPanel, showMessage, unmountPanel } from './panel'
 
 const CHAT_SELECTOR = '.style-scope.yt-live-chat-item-list-renderer'
 const AUTHOR_CHIP_SELECTOR = 'yt-live-chat-author-chip'
-const PLAYER_SELECTOR = '#player'
+const PRIMARY_SELECTOR = '#primary-inner'
 const CHECK_INTERVAL_MS = 1000
 
 function getChatDocuments(): Document[] {
@@ -140,54 +142,42 @@ function watchChat(doc: Document) {
   }
 }
 
-let resizedPlayer: HTMLElement | null = null
-
-function applyLayout(player: HTMLElement, chatElements: Element[]) {
+function hideChat(chatElements: Element[]) {
   // Hide the list renderer itself so newly arriving chat items stay hidden too.
   for (const el of chatElements) {
     const renderer = (el.closest('yt-live-chat-item-list-renderer') ?? el) as HTMLElement
     renderer.style.setProperty('display', 'none', 'important')
   }
-
-  if (resizedPlayer === player) {
-    return
-  }
-  else {
-    restorePlayer()
-    player.style.setProperty('width', '50vw', 'important')
-    player.style.setProperty('max-width', '50vw', 'important')
-    resizedPlayer = player
-    // Let YouTube's player recompute its video dimensions.
-    window.dispatchEvent(new Event('resize'))
-  }
 }
 
-function restorePlayer() {
-  if (!resizedPlayer) {
-    return
-  }
-  else {
-    resizedPlayer.style.removeProperty('width')
-    resizedPlayer.style.removeProperty('max-width')
-    resizedPlayer = null
-    window.dispatchEvent(new Event('resize'))
-  }
+// The video whose chat the panel is showing, or null when not on a video.
+let shownVideoId: string | null = null
+
+function getWatchedVideoId(): string | null {
+  return location.pathname.includes('/watch') ? getVideoId(location.href) : null
 }
 
 function check() {
-  if (!location.pathname.includes('/watch')) {
-    restorePlayer()
+  const videoId = getWatchedVideoId()
+  if (videoId !== shownVideoId) {
+    // Clear the previous video's panel; it's mounted again once chat shows up.
+    unmountPanel()
+    shownVideoId = videoId
+  }
+
+  if (videoId === null) {
     return
   }
   else {
     const docs = getChatDocuments()
     docs.forEach(watchChat)
-    
-    const player = document.querySelector<HTMLElement>(PLAYER_SELECTOR)
-    const chatElements = findChatElements(docs)
 
-    if (player && chatElements.length > 0) {
-      applyLayout(player, chatElements)
+    const chatElements = findChatElements(docs)
+    const primary      = document.querySelector(PRIMARY_SELECTOR)
+
+    if (primary !== null && chatElements.length > 0) {
+      hideChat(chatElements)
+      mountPanel()
     }
   }
 }
@@ -199,19 +189,30 @@ check()
 setInterval(check, CHECK_INTERVAL_MS)
 document.addEventListener('yt-navigate-finish', check)
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (isChatReplyResult(message) && message.original !== null) {
+function logReplyResult(result: ChatReplyResult) {
+  if (result.original !== null) {
     console.log('[Constellate] Reply detected:', {
-      score: message.score,
-      reply: message.message,
-      original: message.original,
+      score: result.score,
+      reply: result.message,
+      original: result.original,
     })
   }
-  else if (isChatReplyResult(message)) {
+  else {
     console.log('[Constellate] Not a reply:', {
-      score: message.score,
-      message: message.message,
+      score: result.score,
+      message: result.message,
     })
+  }
+}
+
+// Messages are shown once the background has checked them for a reply
+// target, so replies can be placed under the messages they answer.
+chrome.runtime.onMessage.addListener((message) => {
+  if (isChatReplyResult(message)) {
+    logReplyResult(message)
+    if (message.videoId === shownVideoId) {
+      showMessage(message.message)
+    }
   }
   return false
 })

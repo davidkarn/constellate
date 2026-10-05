@@ -64,3 +64,66 @@ export function groupBy<T, K>(items: readonly T[], key: (item: T) => K): Map<K, 
   }
   return groups
 }
+
+export function sum(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0)
+}
+
+// Mulberry32, a small seeded PRNG. Returns a value in [0, 1) and the seed for
+// the next call, so callers can stay pure.
+export function nextRandom(seed: number): { value: number; seed: number } {
+  const next = (seed + 0x6d2b79f5) | 0
+  let mixed  = Math.imul(next ^ (next >>> 15), next | 1)
+  mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61)
+  return { value: ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296, seed: next }
+}
+
+export interface Interval {
+  start: number
+  end: number
+}
+
+// The parts of `base` not covered by any of `blocked`. Blocked intervals are
+// open, so a free interval may touch one at its endpoint.
+export function subtractIntervals(
+  base: Interval,
+  blocked: readonly Interval[],
+): Interval[] {
+  const free: Interval[] = []
+  let cursor = base.start
+  for (const interval of sortBy(blocked, (entry) => entry.start)) {
+    if (interval.end <= cursor || interval.start >= base.end) {
+      continue
+    }
+    else {
+      if (interval.start >= cursor) {
+        free.push({ start: cursor, end: interval.start })
+      }
+      cursor = interval.end
+    }
+  }
+  if (cursor <= base.end) {
+    free.push({ start: cursor, end: base.end })
+  }
+  return free
+}
+
+// The point `fraction` (0 to 1) of the way through the combined length of
+// the intervals, or undefined when there are none.
+export function pointInIntervals(
+  intervals: readonly Interval[],
+  fraction: number,
+): number | undefined {
+  const total = sum(intervals.map((interval) => interval.end - interval.start))
+  let remaining = fraction * total
+  for (const interval of intervals) {
+    const length = interval.end - interval.start
+    if (remaining <= length) {
+      return interval.start + remaining
+    }
+    else {
+      remaining -= length
+    }
+  }
+  return intervals.length === 0 ? undefined : intervals[intervals.length - 1].end
+}

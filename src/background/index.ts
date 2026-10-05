@@ -112,6 +112,11 @@ async function analyzeMessage(
   }
 }
 
+// A result for a message that wasn't checked, so it's still shown.
+function unlinkedResult(videoId: string, message: ChatMessage): ChatReplyResult {
+  return { type: 'chat-reply-result', videoId, message, original: null, score: null }
+}
+
 async function handleChatMessages(update: ChatMessagesUpdate, tabId: number | undefined) {
   const { videoId, messages } = update
   const { before } = await updateHistory(videoId, (h) => mergeChatHistory(h, messages))
@@ -123,6 +128,11 @@ async function handleChatMessages(update: ChatMessagesUpdate, tabId: number | un
   }
   else if (apiKey === null) {
     console.warn('[Constellate] No OpenRouter API key set; skipping reply detection.')
+    // Queued so these stay in order with any results still being checked.
+    for (const message of added) {
+      const result = unlinkedResult(videoId, message)
+      analysisQueue.run(async () => sendReplyResult(tabId, result))
+    }
     return
   }
   else {
@@ -131,6 +141,7 @@ async function handleChatMessages(update: ChatMessagesUpdate, tabId: number | un
         .run(() => analyzeMessage(apiKey, videoId, message.id, tabId))
         .catch((error: unknown) => {
           console.error('[Constellate] Reply detection failed:', error)
+          sendReplyResult(tabId, unlinkedResult(videoId, message))
         })
     }
   }
