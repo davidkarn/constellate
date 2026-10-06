@@ -4,7 +4,10 @@ import {
   type ChatReplyResult,
   type ChatMessagesUpdate,
 } from '../shared/chat'
+import type { SendOutcome } from './composer'
 import { parseVideoTime } from './format'
+import { postToLiveChat } from './livechat'
+import { claimOutgoing, type OutgoingReply } from './outgoing'
 import { mountPanel, showMessage, unmountPanel } from './panel'
 
 const CHAT_SELECTOR = '.style-scope.yt-live-chat-item-list-renderer'
@@ -113,6 +116,43 @@ function sendChatMessages(messages: ChatMessage[]) {
 
 const seenChips = new WeakSet<Element>()
 const observedDocs = new WeakSet<Document>()
+// Replies sent from the panel that haven't shown up in the chat yet.
+let pendingReplies: OutgoingReply[] = []
+
+// Marks the viewer's own replies, once they show up in the chat, as replies
+// to the messages they were sent in reply to.
+function markOwnReplies(messages: ChatMessage[]): ChatMessage[] {
+  const now = Date.now()
+  return messages.map((message) => {
+    const claim = claimOutgoing(pendingReplies, message, now)
+    pendingReplies = claim.pending
+    if (claim.replyTo === null) {
+      return message
+    }
+    else {
+      return { ...message, in_reply_to: claim.replyTo }
+    }
+  })
+}
+
+async function sendChatMessage(
+  text: string,
+  replyTo: ChatMessage | null,
+): Promise<SendOutcome> {
+  // Recorded before posting, since the message can show up in the chat
+  // before posting finishes.
+  const pending =
+    replyTo === null ? null : { text, replyTo: replyTo.id, sentAt: Date.now() }
+  if (pending !== null) {
+    pendingReplies = [...pendingReplies, pending]
+  }
+
+  const outcome = await postToLiveChat(getChatDocuments(), text)
+  if (!outcome.ok) {
+    pendingReplies = pendingReplies.filter((reply) => reply !== pending)
+  }
+  return outcome
+}
 
 function readNewMessages(root: ParentNode): ChatMessage[] {
   const messages: ChatMessage[] = []
@@ -134,7 +174,7 @@ function readNewMessages(root: ParentNode): ChatMessage[] {
       }
     }
   }
-  return messages
+  return markOwnReplies(messages)
 }
 
 function watchChat(doc: Document) {
@@ -210,7 +250,7 @@ function check() {
 
     if (primary !== null && chatElements.length > 0) {
       hideChat(chatElements)
-      mountPanel()
+      mountPanel(sendChatMessage)
     }
   }
 }

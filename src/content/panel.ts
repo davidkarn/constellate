@@ -1,10 +1,18 @@
 import type { ChatMessage } from '../shared/chat'
+import {
+  COMPOSER_STYLE,
+  createComposer,
+  type Composer,
+  type SendMessage,
+} from './composer'
+import { createButton, createElement } from './dom'
 import { authorInitial, avatarColor, formatVideoTime } from './format'
 import {
   connectors,
   emptyLayout,
   layoutMessages,
   placeMessage,
+  viewport,
   type ChatLayout,
   type LayoutOptions,
   type NewBubble,
@@ -13,7 +21,14 @@ import {
 // Bubbles shrink to fit their text, up to this fraction of the panel width.
 const MAX_BUBBLE_WIDTH = 0.3
 // Recent messages kept so the panel can be laid out again after a resize.
-const MAX_REMEMBERED_MESSAGES = 300
+// Messages kept for scrolling back through, and for laying out again after a
+// resize. Older ones are dropped.
+const MAX_MESSAGES = 300
+// How close to the bottom counts as following the newest messages.
+const BOTTOM_THRESHOLD = 8
+// How long after a wheel, touch or key event scrolling counts as the
+// viewer's own.
+const USER_SCROLL_MS = 500
 const RESIZE_DEBOUNCE_MS = 150
 
 // Reply chain geometry, in px, matched to the chat design.
@@ -21,8 +36,8 @@ const REPLY_GAP = 8
 const REPLY_INDENT = 44
 // Where the connector line leaves the chain's first message, from its left
 // edge, and where it enters a reply, from its top.
-const CONNECTOR_SPINE = 20
-const CONNECTOR_ELBOW = 17
+const CONNECTOR_SPINE = 16
+const CONNECTOR_ELBOW = 20
 
 // Gives the video column the left half of the window. The panel covers the
 // right half, including YouTube's #secondary column.
@@ -51,11 +66,49 @@ const PANEL_STYLE = `
 :host {
   all: initial;
 }
+.frame {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgb(15, 15, 15);
+  color: rgb(212, 214, 219);
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+.stage-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
 .stage {
   position: absolute;
   inset: 0;
-  overflow: hidden;
-  background: rgb(15, 15, 15);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: rgb(51, 57, 81) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+.canvas {
+  position: relative;
+}
+.jump-button {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  padding: 6px 14px;
+  border: 1px solid rgb(51, 57, 81);
+  border-radius: 16px;
+  background: rgb(26, 29, 37);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  color: rgb(233, 234, 237);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+.jump-button[hidden] {
+  display: none;
 }
 .bubble {
   position: absolute;
@@ -65,8 +118,6 @@ const PANEL_STYLE = `
   border-radius: 12px;
   background: rgb(25, 27, 31);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  color: rgb(212, 214, 219);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   overflow-wrap: anywhere;
   transition: top 300ms ease, left 300ms ease, width 300ms ease;
 }
@@ -81,31 +132,30 @@ const PANEL_STYLE = `
 .header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 28px;
-  margin-bottom: 10px;
+  gap: 8px;
+  height: 20px;
+  margin-bottom: 8px;
 }
 .avatar {
   display: grid;
   flex: none;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   color: rgb(17, 19, 21);
-  font-size: 13px;
+  font-size: 10px;
   font-weight: 700;
 }
 .reply .avatar {
-  width: 24px;
-  height: 24px;
-  font-size: 11px;
+  width: 18px;
+  height: 18px;
+  font-size: 9px;
 }
 .author {
   min-width: 0;
   overflow: hidden;
   color: rgb(233, 234, 237);
-  font-size: 14px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -115,7 +165,35 @@ const PANEL_STYLE = `
   margin-left: auto;
   padding-left: 16px;
   color: rgb(127, 132, 141);
-  font-size: 13px;
+}
+.reply-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgb(127, 132, 141);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+.bubble:hover .reply-button,
+.reply-button:focus-visible {
+  opacity: 1;
+}
+.reply-button:hover {
+  background: rgb(44, 48, 56);
+  color: rgb(233, 234, 237);
+}
+.reply-button svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 .connector {
   position: absolute;
@@ -130,7 +208,24 @@ const PANEL_STYLE = `
 interface Panel {
   host: HTMLElement
   pageStyle: HTMLStyleElement
+  // Scrolls through the canvas, which holds the bubbles.
   stage: HTMLElement
+  canvas: HTMLElement
+  jumpButton: HTMLButtonElement
+  // Whether the stage keeps scrolling to the newest message. Turns off when
+  // the viewer scrolls up.
+  following: boolean
+  // Until when scroll events count as the viewer's own. Scrolling done by
+  // the panel itself never changes `following`.
+  userScrollUntil: number
+  // Whether the viewer is dragging the scrollbar.
+  dragging: boolean
+  // The layout y at the top of the canvas.
+  origin: number
+  composer: Composer
+  // Relays out the bubbles when the stage changes size, such as when the
+  // composer's reply bar appears.
+  stageObserver: ResizeObserver
   // Sits under the bubbles, holding the reply connector lines.
   connectorLayer: HTMLElement
   layout: ChatLayout
@@ -161,7 +256,7 @@ function readLayoutOptions(stage: HTMLElement): LayoutOptions {
   const rem = remInPixels()
   return {
     width: stage.clientWidth,
-    height: stage.clientHeight,
+    maxBubbles: MAX_MESSAGES,
     margin: rem,
     gap: 2 * rem,
     replyGap: REPLY_GAP,
@@ -182,11 +277,19 @@ function positionHost(host: HTMLElement) {
     `position: fixed; top: ${top}px; right: 0; bottom: 0; width: 50vw; z-index: 2000;`
 }
 
-function createElement(className: string, text: string): HTMLElement {
-  const element = document.createElement('div')
-  element.className   = className
-  element.textContent = text
-  return element
+// A curved "reply" arrow.
+const REPLY_ICON_PATH = 'M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z'
+
+function createReplyButton(message: ChatMessage): HTMLButtonElement {
+  const button = createButton('reply-button', '', `Reply to ${message.author}`)
+  const icon   = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  const path   = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  icon.setAttribute('viewBox', '0 0 24 24')
+  path.setAttribute('d', REPLY_ICON_PATH)
+  icon.append(path)
+  button.append(icon)
+  button.addEventListener('click', () => panel?.composer.startReply(message))
+  return button
 }
 
 function createBubble(message: ChatMessage): HTMLElement {
@@ -196,6 +299,7 @@ function createBubble(message: ChatMessage): HTMLElement {
   const time   = createElement('time', videoTimeLabel(message))
   avatar.style.background = avatarColor(message.author)
   header.append(avatar, createElement('author', message.author), time)
+  header.append(createReplyButton(message))
   bubble.append(header, createElement('text', message.message))
   return bubble
 }
@@ -210,29 +314,36 @@ function videoTimeLabel(message: ChatMessage): string {
   }
 }
 
-// Adds a hidden bubble to the stage and returns it with its rendered size.
+// Adds a hidden bubble to the canvas and returns it with its rendered size.
 // It shrinks to fit its text, up to MAX_BUBBLE_WIDTH of the panel.
 function measureBubble(
-  stage: HTMLElement,
+  current: Panel,
   message: ChatMessage,
 ): { element: HTMLElement; bubble: NewBubble } {
   const element = createBubble(message)
   element.classList.add('measuring')
   element.style.width    = 'max-content'
-  element.style.maxWidth = `${MAX_BUBBLE_WIDTH * stage.clientWidth}px`
-  stage.append(element)
+  element.style.maxWidth = `${MAX_BUBBLE_WIDTH * current.stage.clientWidth}px`
+  current.canvas.append(element)
+  // Round fractional sizes up: rounding the width down would make the text
+  // wrap onto an extra line once the bubble is given that width.
+  const size   = element.getBoundingClientRect()
   const bubble = {
     id: message.id,
     parentId: message.in_reply_to ?? null,
-    width: element.offsetWidth,
-    height: element.offsetHeight,
+    width: Math.ceil(size.width),
+    height: Math.ceil(size.height),
   }
   return { element, bubble }
 }
 
 // Moves every bubble to its place in the layout and removes the ones the
-// layout dropped off the top of the panel.
+// layout dropped.
 function render(current: Panel) {
+  const view = viewport(current.layout, current.stage.clientHeight, remInPixels())
+  current.origin = view.origin
+  current.canvas.style.height = `${view.height}px`
+
   const placed = new Set<string>()
   for (const bubble of current.layout.bubbles) {
     const element = current.elements.get(bubble.id)
@@ -243,7 +354,7 @@ function render(current: Panel) {
       placed.add(bubble.id)
       element.classList.toggle('reply', bubble.anchorId !== null)
       element.style.left  = `${bubble.x}px`
-      element.style.top   = `${bubble.y}px`
+      element.style.top   = `${bubble.y - view.origin}px`
       element.style.width = `${bubble.width}px`
     }
   }
@@ -255,10 +366,10 @@ function render(current: Panel) {
     }
   }
 
-  renderConnectors(current)
+  renderConnectors(current, view.origin)
 }
 
-function renderConnectors(current: Panel) {
+function renderConnectors(current: Panel, origin: number) {
   const lines = connectors(current.layout, CONNECTOR_SPINE, CONNECTOR_ELBOW)
   const drawn = new Set(lines.map((line) => line.id))
   for (const line of lines) {
@@ -269,7 +380,7 @@ function renderConnectors(current: Panel) {
       current.connectorLayer.append(element)
     }
     element.style.left   = `${line.left}px`
-    element.style.top    = `${line.top}px`
+    element.style.top    = `${line.top - origin}px`
     element.style.width  = `${line.width}px`
     element.style.height = `${line.height}px`
   }
@@ -279,6 +390,42 @@ function renderConnectors(current: Panel) {
       element.remove()
       current.connectors.delete(id)
     }
+  }
+}
+
+function isAtBottom(stage: HTMLElement): boolean {
+  return stage.scrollHeight - stage.scrollTop - stage.clientHeight < BOTTOM_THRESHOLD
+}
+
+function setFollowing(current: Panel, following: boolean) {
+  current.following         = following
+  current.jumpButton.hidden = following
+}
+
+function scrollToLatest(current: Panel, smooth: boolean) {
+  const target = current.stage.scrollHeight - current.stage.clientHeight
+  if (Math.abs(target - current.stage.scrollTop) < 1) {
+    return
+  }
+  else if (smooth) {
+    current.stage.scrollTo({ top: target, behavior: 'smooth' })
+  }
+  else {
+    current.stage.scrollTop = target
+  }
+}
+
+// Renders, then either scrolls to the newest message or, when the viewer
+// has scrolled up, keeps what they're reading where it was.
+function renderAndScroll(current: Panel, smooth: boolean) {
+  const previousOrigin = current.origin
+  render(current)
+  if (current.following) {
+    scrollToLatest(current, smooth)
+  }
+  else {
+    // A higher origin shifts everything down the canvas by the difference.
+    current.stage.scrollTop += previousOrigin - current.origin
   }
 }
 
@@ -305,19 +452,19 @@ export function showMessages(messages: readonly ChatMessage[]) {
     current.connectors.clear()
 
     const measured = messages.map((message) => {
-      const { element, bubble } = measureBubble(current.stage, message)
+      const { element, bubble } = measureBubble(current, message)
       current.elements.set(message.id, element)
       return bubble
     })
     current.layout   = layoutMessages(measured, options, current.seed)
-    current.messages = messages.slice(-MAX_REMEMBERED_MESSAGES)
-    render(current)
+    current.messages = messages.slice(-MAX_MESSAGES)
+    renderAndScroll(current, false)
     current.elements.forEach((element) => element.classList.remove('measuring'))
   }
 }
 
-// Places one new message and scrolls everything up so it sits at the bottom
-// of the panel.
+// Places one new message below the others, and scrolls to it unless the
+// viewer has scrolled up to read older messages.
 export function showMessage(message: ChatMessage) {
   if (panel === null || panel.elements.has(message.id)) {
     return
@@ -325,12 +472,12 @@ export function showMessage(message: ChatMessage) {
   else {
     const current = panel
     const options = readLayoutOptions(current.stage)
-    const { element, bubble } = measureBubble(current.stage, message)
+    const { element, bubble } = measureBubble(current, message)
 
     current.elements.set(message.id, element)
     current.layout   = placeMessage(current.layout, bubble, options)
-    current.messages = [...current.messages, message].slice(-MAX_REMEMBERED_MESSAGES)
-    render(current)
+    current.messages = [...current.messages, message].slice(-MAX_MESSAGES)
+    renderAndScroll(current, true)
     reveal(element)
   }
 }
@@ -345,7 +492,8 @@ function scheduleRelayout() {
   }, RESIZE_DEBOUNCE_MS)
 }
 
-export function mountPanel() {
+// Shows the panel. `send` posts what the viewer types in its message box.
+export function mountPanel(send: SendMessage) {
   if (panel !== null) {
     return
   }
@@ -357,20 +505,76 @@ export function mountPanel() {
     const host = document.createElement('div')
     host.id = 'constellate-panel'
     positionHost(host)
-    const root  = host.attachShadow({ mode: 'open' })
-    const style = document.createElement('style')
-    const stage = createElement('stage', '')
+    const root     = host.attachShadow({ mode: 'open' })
+    const style    = document.createElement('style')
+    const frame    = createElement('frame', '')
+    const wrap     = createElement('stage-wrap', '')
+    const stage    = createElement('stage', '')
+    const canvas   = createElement('canvas', '')
+    const composer = createComposer(send)
     const connectorLayer = createElement('connectors', '')
-    style.textContent = PANEL_STYLE
-    stage.append(connectorLayer)
-    root.append(style, stage)
+    const jumpButton     =
+      createButton('jump-button', 'Jump to latest ↓', 'Jump to latest')
+    style.textContent = PANEL_STYLE + COMPOSER_STYLE
+    jumpButton.hidden = true
+    canvas.append(connectorLayer)
+    stage.append(canvas)
+    wrap.append(stage, jumpButton)
+    frame.append(wrap, composer.element)
+    root.append(style, frame)
     document.body.append(host)
+
+    // Only the viewer's own scrolling turns following off (scrolling up) or
+    // back on (scrolling to the bottom).
+    const noteUserScroll = () => {
+      if (panel !== null) {
+        panel.userScrollUntil = Date.now() + USER_SCROLL_MS
+      }
+    }
+    for (const type of ['wheel', 'touchmove', 'keydown']) {
+      stage.addEventListener(type, noteUserScroll, { passive: true })
+    }
+    stage.addEventListener('pointerdown', () => {
+      if (panel !== null) {
+        panel.dragging = true
+      }
+    })
+    const endDrag = () => {
+      if (panel !== null) {
+        panel.dragging = false
+        setFollowing(panel, isAtBottom(stage))
+      }
+    }
+    stage.addEventListener('pointerup', endDrag)
+    stage.addEventListener('pointercancel', endDrag)
+    stage.addEventListener('scroll', () => {
+      if (panel !== null && (panel.dragging || Date.now() < panel.userScrollUntil)) {
+        setFollowing(panel, isAtBottom(stage))
+      }
+    })
+    jumpButton.addEventListener('click', () => {
+      if (panel !== null) {
+        setFollowing(panel, true)
+        scrollToLatest(panel, true)
+      }
+    })
+
+    const stageObserver = new ResizeObserver(scheduleRelayout)
+    stageObserver.observe(stage)
 
     const seed = Math.floor(Math.random() * 2 ** 32)
     panel = {
       host,
       pageStyle,
       stage,
+      canvas,
+      jumpButton,
+      following: true,
+      userScrollUntil: 0,
+      dragging: false,
+      origin: 0,
+      composer,
+      stageObserver,
       connectorLayer,
       layout: emptyLayout(seed),
       messages: [],
@@ -391,6 +595,7 @@ export function unmountPanel() {
   else {
     window.removeEventListener('resize', scheduleRelayout)
     clearTimeout(resizeTimer)
+    panel.stageObserver.disconnect()
     panel.host.remove()
     panel.pageStyle.remove()
     panel = null

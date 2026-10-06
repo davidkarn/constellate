@@ -9,11 +9,13 @@ import {
   type Interval,
 } from '../lib'
 
-// Distances are in pixels, measured from the panel's top-left corner.
+// Distances are in pixels. x is measured from the panel's left edge; y only
+// matters relative to other bubbles, and grows downwards as messages arrive.
 export interface LayoutOptions {
-  // Panel size.
+  // Panel width.
   width: number
-  height: number
+  // How many bubbles to keep. Beyond this, the highest ones are dropped.
+  maxBubbles: number
   // Space kept clear along the panel's edges.
   margin: number
   // Minimum space between bubbles.
@@ -497,20 +499,24 @@ function placeBubbles(
   }
 }
 
-// Moves every bubble vertically so the lowest bottom edge sits `margin`
-// above the panel's bottom, and drops bubbles that end up entirely above
-// the top.
-function alignToBottom(bubbles: readonly PlacedBubble[], options: LayoutOptions) {
-  const lowest = Math.max(...bubbles.map(bottomOf))
-  const shift  = options.height - options.margin - lowest
-  return bubbles
-    .map((bubble) => ({ ...bubble, y: bubble.y + shift }))
-    .filter((bubble) => bottomOf(bubble) > 0)
+// Drops the highest bubbles once there are more than `max`.
+function trimOldest(bubbles: readonly PlacedBubble[], max: number): PlacedBubble[] {
+  if (bubbles.length <= max) {
+    return [...bubbles]
+  }
+  else {
+    const dropped = new Set(
+      sortBy(bubbles, (bubble) => bubble.y)
+        .slice(0, bubbles.length - max)
+        .map((bubble) => bubble.id),
+    )
+    return bubbles.filter((bubble) => !dropped.has(bubble.id))
+  }
 }
 
-// Places a new message, then moves everything so it sits at the bottom of
-// the panel. It's always the lowest message, and starts at least `minDrop`
-// below every other message's top.
+// Places a new message below the others: it's always the lowest message,
+// and starts at least `minDrop` below every other message's top. Existing
+// bubbles only move when pushed aside to make room.
 //
 // - The first message goes at a random spot.
 // - A reply is stacked under the chain of messages it replies to, which is
@@ -527,7 +533,7 @@ export function placeMessage(
   const random = nextRandom(layout.seed)
   const width  = Math.min(bubble.width, options.width - 2 * options.margin)
   const placed = placeBubbles(layout.bubbles, { ...bubble, width }, random.value, options)
-  return { bubbles: alignToBottom(placed, options), seed: random.seed }
+  return { bubbles: trimOldest(placed, options.maxBubbles), seed: random.seed }
 }
 
 // Lays out messages from scratch, oldest first.
@@ -571,4 +577,30 @@ export function connectors(
       }
     }
   })
+}
+
+// Where a scrollable view of the layout starts, and how tall it is: from
+// `margin` above the highest bubble to `margin` below the lowest. When that's
+// shorter than `viewHeight` the view is padded at the top, so the bubbles sit
+// at the bottom.
+export interface Viewport {
+  // The layout y shown at the top of the view.
+  origin: number
+  height: number
+}
+
+export function viewport(
+  layout: ChatLayout,
+  viewHeight: number,
+  margin: number,
+): Viewport {
+  if (layout.bubbles.length === 0) {
+    return { origin: 0, height: viewHeight }
+  }
+  else {
+    const top    = Math.min(...layout.bubbles.map((bubble) => bubble.y)) - margin
+    const bottom = Math.max(...layout.bubbles.map(bottomOf)) + margin
+    const origin = Math.min(top, bottom - viewHeight)
+    return { origin, height: bottom - origin }
+  }
 }

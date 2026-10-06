@@ -55,3 +55,13 @@ export function avatarColor(author: string): string {
   )
   return AVATAR_COLORS[hash % AVATAR_COLORS.length]
 }
+
+// The text that starts a reply to `author`, like "@thunderhawk ".
+export function mentionFor(author: string): string {
+  if (author.startsWith('@')) {
+    return `${author} `
+  }
+  else {
+    return `@${author} `
+  }
+}

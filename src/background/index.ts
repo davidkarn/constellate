@@ -117,26 +117,57 @@ function unlinkedResult(videoId: string, message: ChatMessage): ChatReplyResult 
   return { type: 'chat-reply-result', videoId, message, original: null, score: null }
 }
 
+// Links a reply the viewer marked themselves when sending it from the panel.
+async function linkKnownReply(
+  videoId: string,
+  message: ChatMessage,
+  parentId: string,
+  tabId: number | undefined,
+) {
+  const { after } =
+    await updateHistory(videoId, (h) => linkReply(h, message.id, parentId))
+  sendReplyResult(tabId, {
+    type: 'chat-reply-result',
+    videoId,
+    message: after.find((entry) => entry.id === message.id) ?? message,
+    original: after.find((entry) => entry.id === parentId) ?? null,
+    score: null,
+  })
+}
+
 async function handleChatMessages(update: ChatMessagesUpdate, tabId: number | undefined) {
   const { videoId, messages } = update
   const { before } = await updateHistory(videoId, (h) => mergeChatHistory(h, messages))
-  const added = findNewMessages(before, messages)
+  const added  = findNewMessages(before, messages)
   const apiKey = await getOpenRouterApiKey()
 
-  if (added.length === 0) {
+  // Replies that arrive already marked skip detection, and the queue, so the
+  // viewer's own reply shows up straight away.
+  for (const message of added) {
+    if (message.in_reply_to !== undefined) {
+      linkKnownReply(videoId, message, message.in_reply_to, tabId)
+        .catch((error: unknown) => {
+          console.error('[Constellate] Failed to link reply:', error)
+          sendReplyResult(tabId, unlinkedResult(videoId, message))
+        })
+    }
+  }
+  const unchecked = added.filter((message) => message.in_reply_to === undefined)
+
+  if (unchecked.length === 0) {
     return
   }
   else if (apiKey === null) {
     console.warn('[Constellate] No OpenRouter API key set; skipping reply detection.')
     // Queued so these stay in order with any results still being checked.
-    for (const message of added) {
+    for (const message of unchecked) {
       const result = unlinkedResult(videoId, message)
       analysisQueue.run(async () => sendReplyResult(tabId, result))
     }
     return
   }
   else {
-    for (const message of added) {
+    for (const message of unchecked) {
       analysisQueue
         .run(() => analyzeMessage(apiKey, videoId, message.id, tabId))
         .catch((error: unknown) => {
