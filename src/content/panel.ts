@@ -166,28 +166,35 @@ const PANEL_STYLE = `
   padding-left: 16px;
   color: rgb(127, 132, 141);
 }
+/* Sits over the bubble's bottom-right corner. A hovered bubble is raised so
+   its button isn't hidden under a neighbour, such as a reply below it. */
+.bubble:hover {
+  z-index: 1;
+}
 .reply-button {
+  position: absolute;
+  right: -10px;
+  bottom: -10px;
   display: grid;
-  flex: none;
   place-items: center;
-  width: 20px;
-  height: 20px;
-  margin-left: 4px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  border: 0;
+  border: 1px solid rgb(51, 57, 81);
   border-radius: 50%;
-  background: transparent;
+  background: rgb(34, 37, 43);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   color: rgb(127, 132, 141);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 150ms ease, background 150ms ease;
+  transition: opacity 150ms ease, background 150ms ease, color 150ms ease;
 }
 .bubble:hover .reply-button,
 .reply-button:focus-visible {
   opacity: 1;
 }
 .reply-button:hover {
-  background: rgb(44, 48, 56);
+  background: rgb(51, 57, 81);
   color: rgb(233, 234, 237);
 }
 .reply-button svg {
@@ -299,8 +306,11 @@ function createBubble(message: ChatMessage): HTMLElement {
   const time   = createElement('time', videoTimeLabel(message))
   avatar.style.background = avatarColor(message.author)
   header.append(avatar, createElement('author', message.author), time)
-  header.append(createReplyButton(message))
-  bubble.append(header, createElement('text', message.message))
+  bubble.append(
+    header,
+    createElement('text', message.message),
+    createReplyButton(message),
+  )
   return bubble
 }
 
