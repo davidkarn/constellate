@@ -127,3 +127,22 @@ export function pointInIntervals(
   }
   return intervals.length === 0 ? undefined : intervals[intervals.length - 1].end
 }
+
+// The item with the smallest key, or undefined for an empty list. Ties keep
+// the earliest item.
+export function minBy<T>(items: readonly T[], key: (item: T) => number): T | undefined {
+  return maxBy(items, (item) => -key(item))
+}
+
+// Evenly spaced numbers from `start` to `end`, always including `end`.
+// Empty when `end` is before `start`.
+export function range(start: number, end: number, step: number): number[] {
+  if (end < start) {
+    return []
+  }
+  else {
+    const count = Math.floor((end - start) / step)
+    const steps = Array.from({ length: count + 1 }, (_, index) => start + index * step)
+    return steps[steps.length - 1] === end ? steps : [...steps, end]
+  }
+}

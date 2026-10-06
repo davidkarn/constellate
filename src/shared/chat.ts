@@ -6,6 +6,8 @@ export interface ChatMessage {
   message: string
   // Milliseconds since the epoch.
   timestamp: number
+  // Seconds into the video when the message was sent, when known.
+  videoTime?: number
   // Id of the message this one replies to.
   in_reply_to?: string
   // Ids of the messages that reply to this one.

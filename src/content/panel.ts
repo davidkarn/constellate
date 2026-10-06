@@ -1,5 +1,7 @@
 import type { ChatMessage } from '../shared/chat'
+import { authorInitial, avatarColor, formatVideoTime } from './format'
 import {
+  connectors,
   emptyLayout,
   layoutMessages,
   placeMessage,
@@ -13,6 +15,14 @@ const MAX_BUBBLE_WIDTH = 0.3
 // Recent messages kept so the panel can be laid out again after a resize.
 const MAX_REMEMBERED_MESSAGES = 300
 const RESIZE_DEBOUNCE_MS = 150
+
+// Reply chain geometry, in px, matched to the chat design.
+const REPLY_GAP = 8
+const REPLY_INDENT = 44
+// Where the connector line leaves the chain's first message, from its left
+// edge, and where it enters a reply, from its top.
+const CONNECTOR_SPINE = 20
+const CONNECTOR_ELBOW = 17
 
 // Gives the video column the left half of the window. The panel covers the
 // right half, including YouTube's #secondary column.
@@ -34,6 +44,9 @@ ytd-watch-flexy #primary-inner {
 }
 `
 
+// Indented replies get their own colors and a smaller avatar. Both kinds
+// share the same vertical sizes, so a bubble's height doesn't change when it
+// becomes part of a reply chain.
 const PANEL_STYLE = `
 :host {
   all: initial;
@@ -47,26 +60,70 @@ const PANEL_STYLE = `
 .bubble {
   position: absolute;
   box-sizing: border-box;
-  padding: 6px 10px;
+  padding: 16px 18px 18px;
+  border: 1px solid rgb(34, 37, 43);
   border-radius: 12px;
-  background: rgb(39, 39, 39);
-  color: rgb(241, 241, 241);
-  font: 13px/1.4 Roboto, Arial, sans-serif;
+  background: rgb(25, 27, 31);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  color: rgb(212, 214, 219);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   overflow-wrap: anywhere;
-  transition: top 300ms ease, left 300ms ease;
+  transition: top 300ms ease, left 300ms ease, width 300ms ease;
 }
 .bubble.reply {
-  background: rgb(30, 42, 60);
+  border-color: rgb(51, 57, 81);
+  background: rgb(26, 29, 37);
 }
 .bubble.measuring {
   visibility: hidden;
   transition: none;
 }
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+  margin-bottom: 10px;
+}
+.avatar {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: rgb(17, 19, 21);
+  font-size: 13px;
+  font-weight: 700;
+}
+.reply .avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
 .author {
-  margin-bottom: 2px;
-  font-size: 12px;
-  font-weight: 500;
-  color: rgb(170, 170, 170);
+  min-width: 0;
+  overflow: hidden;
+  color: rgb(233, 234, 237);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.time {
+  flex: none;
+  margin-left: auto;
+  padding-left: 16px;
+  color: rgb(127, 132, 141);
+  font-size: 13px;
+}
+.connector {
+  position: absolute;
+  box-sizing: border-box;
+  border-bottom: 2px solid rgb(68, 77, 111);
+  border-left: 2px solid rgb(68, 77, 111);
+  border-bottom-left-radius: 8px;
+  transition: top 300ms ease, left 300ms ease, width 300ms ease, height 300ms ease;
 }
 `
 
@@ -74,10 +131,14 @@ interface Panel {
   host: HTMLElement
   pageStyle: HTMLStyleElement
   stage: HTMLElement
+  // Sits under the bubbles, holding the reply connector lines.
+  connectorLayer: HTMLElement
   layout: ChatLayout
   // Oldest first.
   messages: ChatMessage[]
   elements: Map<string, HTMLElement>
+  // Connector lines, keyed by the id of the reply they lead to.
+  connectors: Map<string, HTMLElement>
   // Seed for laying out from scratch, so a relayout picks the same spots
   // whenever the bubble sizes haven't changed.
   seed: number
@@ -103,9 +164,13 @@ function readLayoutOptions(stage: HTMLElement): LayoutOptions {
     height: stage.clientHeight,
     margin: rem,
     gap: 2 * rem,
+    replyGap: REPLY_GAP,
+    indent: REPLY_INDENT,
     drop: 2 * rem,
+    minDrop: 1.5 * rem,
     step: rem,
     push: 3 * rem,
+    lift: 10 * rem,
   }
 }
 
@@ -117,16 +182,32 @@ function positionHost(host: HTMLElement) {
     `position: fixed; top: ${top}px; right: 0; bottom: 0; width: 50vw; z-index: 2000;`
 }
 
-function createBubble(message: ChatMessage): HTMLElement {
-  const element  = document.createElement('div')
-  const author   = document.createElement('div')
-  const text     = document.createElement('div')
-  element.className  = message.in_reply_to === undefined ? 'bubble' : 'bubble reply'
-  author.className   = 'author'
-  author.textContent = message.author
-  text.textContent   = message.message
-  element.append(author, text)
+function createElement(className: string, text: string): HTMLElement {
+  const element = document.createElement('div')
+  element.className   = className
+  element.textContent = text
   return element
+}
+
+function createBubble(message: ChatMessage): HTMLElement {
+  const bubble = createElement('bubble', '')
+  const header = createElement('header', '')
+  const avatar = createElement('avatar', authorInitial(message.author))
+  const time   = createElement('time', videoTimeLabel(message))
+  avatar.style.background = avatarColor(message.author)
+  header.append(avatar, createElement('author', message.author), time)
+  bubble.append(header, createElement('text', message.message))
+  return bubble
+}
+
+// Where in the video the message was sent, or nothing when unknown.
+function videoTimeLabel(message: ChatMessage): string {
+  if (message.videoTime === undefined) {
+    return ''
+  }
+  else {
+    return formatVideoTime(message.videoTime)
+  }
 }
 
 // Adds a hidden bubble to the stage and returns it with its rendered size.
@@ -142,6 +223,7 @@ function measureBubble(
   stage.append(element)
   const bubble = {
     id: message.id,
+    parentId: message.in_reply_to ?? null,
     width: element.offsetWidth,
     height: element.offsetHeight,
   }
@@ -159,6 +241,7 @@ function render(current: Panel) {
     }
     else {
       placed.add(bubble.id)
+      element.classList.toggle('reply', bubble.anchorId !== null)
       element.style.left  = `${bubble.x}px`
       element.style.top   = `${bubble.y}px`
       element.style.width = `${bubble.width}px`
@@ -169,6 +252,32 @@ function render(current: Panel) {
     if (!placed.has(id)) {
       element.remove()
       current.elements.delete(id)
+    }
+  }
+
+  renderConnectors(current)
+}
+
+function renderConnectors(current: Panel) {
+  const lines = connectors(current.layout, CONNECTOR_SPINE, CONNECTOR_ELBOW)
+  const drawn = new Set(lines.map((line) => line.id))
+  for (const line of lines) {
+    const existing = current.connectors.get(line.id)
+    const element  = existing ?? createElement('connector', '')
+    if (existing === undefined) {
+      current.connectors.set(line.id, element)
+      current.connectorLayer.append(element)
+    }
+    element.style.left   = `${line.left}px`
+    element.style.top    = `${line.top}px`
+    element.style.width  = `${line.width}px`
+    element.style.height = `${line.height}px`
+  }
+
+  for (const [id, element] of current.connectors) {
+    if (!drawn.has(id)) {
+      element.remove()
+      current.connectors.delete(id)
     }
   }
 }
@@ -192,6 +301,8 @@ export function showMessages(messages: readonly ChatMessage[]) {
     const options = readLayoutOptions(current.stage)
     current.elements.forEach((element) => element.remove())
     current.elements.clear()
+    current.connectors.forEach((element) => element.remove())
+    current.connectors.clear()
 
     const measured = messages.map((message) => {
       const { element, bubble } = measureBubble(current.stage, message)
@@ -248,9 +359,10 @@ export function mountPanel() {
     positionHost(host)
     const root  = host.attachShadow({ mode: 'open' })
     const style = document.createElement('style')
-    const stage = document.createElement('div')
+    const stage = createElement('stage', '')
+    const connectorLayer = createElement('connectors', '')
     style.textContent = PANEL_STYLE
-    stage.className   = 'stage'
+    stage.append(connectorLayer)
     root.append(style, stage)
     document.body.append(host)
 
@@ -259,9 +371,11 @@ export function mountPanel() {
       host,
       pageStyle,
       stage,
+      connectorLayer,
       layout: emptyLayout(seed),
       messages: [],
       elements: new Map(),
+      connectors: new Map(),
       seed,
     }
     window.addEventListener('resize', scheduleRelayout)

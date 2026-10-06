@@ -4,6 +4,7 @@ import {
   type ChatReplyResult,
   type ChatMessagesUpdate,
 } from '../shared/chat'
+import { parseVideoTime } from './format'
 import { mountPanel, showMessage, unmountPanel } from './panel'
 
 const CHAT_SELECTOR = '.style-scope.yt-live-chat-item-list-renderer'
@@ -47,18 +48,49 @@ function readText(el: Element | null): string {
   }
 }
 
-function readChatMessage(chip: Element, timestamp: number): ChatMessage | null {
+// Seconds into the video the viewer is watching, if one is playing.
+function readPlayhead(): number | undefined {
+  const video = document.querySelector<HTMLVideoElement>('#movie_player video')
+  if (video === null || !Number.isFinite(video.currentTime)) {
+    return undefined
+  }
+  else {
+    return video.currentTime
+  }
+}
+
+// A chat replay labels each message with its position in the video. Live
+// chat labels it with the time of day instead, so a live message gets the
+// playhead's position when it arrives.
+function readVideoTime(renderer: Element, playhead: number | undefined) {
+  const replay = renderer.ownerDocument.location.pathname.includes('live_chat_replay')
+  const label  = renderer.querySelector('#timestamp')?.textContent ?? ''
+  if (replay) {
+    return parseVideoTime(label) ?? playhead
+  }
+  else {
+    return playhead
+  }
+}
+
+function readChatMessage(
+  chip: Element,
+  timestamp: number,
+  playhead: number | undefined,
+): ChatMessage | null {
   const author = readText(chip.querySelector('#author-name'))
   // Each message renderer is a direct child of #items, with YouTube's message
   // id as its element id.
-  const id = chip.closest('#items > *')?.id ?? ''
-  if (author.length === 0 || id.length === 0) {
+  const renderer = chip.closest('#items > *')
+  const id       = renderer?.id ?? ''
+  if (renderer === null || author.length === 0 || id.length === 0) {
     return null
   }
   else {
     const container = chip.closest('#content') ?? chip.parentElement
     const message   = readText(container?.querySelector('#message') ?? null)
-    return { id, author, message, timestamp }
+    const videoTime = readVideoTime(renderer, playhead)
+    return { id, author, message, timestamp, videoTime }
   }
 }
 
@@ -84,13 +116,14 @@ const observedDocs = new WeakSet<Document>()
 
 function readNewMessages(root: ParentNode): ChatMessage[] {
   const messages: ChatMessage[] = []
-  const now = Date.now()
+  const now      = Date.now()
+  const playhead = readPlayhead()
   for (const chip of root.querySelectorAll(AUTHOR_CHIP_SELECTOR)) {
     if (seenChips.has(chip)) {
       continue
     }
     else {
-      const message = readChatMessage(chip, now)
+      const message = readChatMessage(chip, now, playhead)
       // Leave unreadable chips unseen so a later pass can pick them up.
       if (!message) {
         continue
